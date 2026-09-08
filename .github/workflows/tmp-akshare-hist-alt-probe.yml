@@ -1,0 +1,17 @@
+name: tmp-akshare-hist-alt-probe
+on:
+  push:
+    branches:
+      - tmp-a-stock-run-20260908
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install akshare pandas
+      - run: python .tmp/akshare_hist_alt_probe.py
