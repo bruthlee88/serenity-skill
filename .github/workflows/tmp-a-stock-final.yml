@@ -1,0 +1,26 @@
+name: tmp-a-stock-final
+on:
+  push:
+    branches:
+      - tmp-a-stock-run-20260908
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install akshare pandas curl_cffi
+      - name: Run final screening
+        run: python .tmp/a_stock_run_final.py
+      - name: Upload result data
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-stock-final-data-20260908
+          path: .tmp/out_final/*
+          if-no-files-found: error
