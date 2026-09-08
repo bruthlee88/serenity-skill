@@ -1,0 +1,152 @@
+name: tmp-a-stock-run
+on:
+  push:
+    branches:
+      - tmp-a-stock-run-20260908
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install akshare pandas openpyxl
+      - name: Run screening
+        run: |
+          python .tmp/a_stock_run.py
+      - name: Build Excel
+        run: |
+          python - <<'PY'
+          import os, json, time
+          from openpyxl import Workbook
+          from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+          from openpyxl.utils import get_column_letter
+          import pandas as pd
+
+          outdir='.tmp/out'
+          with open(os.path.join(outdir,'meta.json'),'r',encoding='utf-8') as f:
+              meta=json.load(f)
+          basic=pd.read_csv(os.path.join(outdir,'basic.csv')) if os.path.getsize(os.path.join(outdir,'basic.csv')) else pd.DataFrame()
+          focus=pd.read_csv(os.path.join(outdir,'focus.csv')) if os.path.getsize(os.path.join(outdir,'focus.csv')) else pd.DataFrame()
+          recovery=pd.read_csv(os.path.join(outdir,'recovery.csv')) if os.path.getsize(os.path.join(outdir,'recovery.csv')) else pd.DataFrame()
+          errors=pd.read_csv(os.path.join(outdir,'errors.csv')) if os.path.getsize(os.path.join(outdir,'errors.csv')) else pd.DataFrame()
+
+          t0=time.perf_counter()
+          wb=Workbook()
+          ws=wb.active
+          ws.title='运行摘要'
+          title_fill=PatternFill('solid', fgColor='1F4E78')
+          hdr_fill=PatternFill('solid', fgColor='D9EAF7')
+          warn_fill=PatternFill('solid', fgColor='FFF2CC')
+          long_fill=PatternFill('solid', fgColor='F4CCCC')
+          thin=Side(style='thin',color='B7C9D6')
+          border=Border(left=thin,right=thin,top=thin,bottom=thin)
+          def title(ws, text, last_col):
+              ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=last_col)
+              c=ws.cell(1,1,text); c.fill=title_fill; c.font=Font(color='FFFFFF',bold=True,size=14)
+          def header(ws,row,n):
+              for c in ws[row][:n]:
+                  c.fill=hdr_fill;c.font=Font(bold=True);c.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True);c.border=border
+          def autosize(ws, maxw=34):
+              for col in ws.columns:
+                  letter=get_column_letter(col[0].column)
+                  m=0
+                  for cell in col[:300]:
+                      try:m=max(m,len(str(cell.value or '')))
+                      except:pass
+                  ws.column_dimensions[letter].width=min(max(9,m+2),maxw)
+          title(ws, f"A股趋势筛选正式输出 — {meta['run_date']}", 6)
+          rows=[
+              ['项目','值','说明','项目','值','说明'],
+              ['运行开始(北京)',meta['run_started_bj'],'','运行结束(北京)',meta['run_completed_bj'],''],
+              ['实时快照完成',meta['spot_fetch_completed_bj'],'本次手工运行使用实际执行时点快照','AKShare版本',meta['akshare_version'],''],
+              ['成交额≥2亿且剔除ST后的股票数',meta['universe_after_amount_st_stocks'],'','历史成功',meta['history_success_count'],''],
+              ['基础入选数',meta['basic_count'],'EMA13持续≥4天','重点关注数',meta['focus_count'],'基础入选+EMA610连续≥3天'],
+              ['大阳线收复数',meta['recovery_count'],'最近5个实际交易日首次合格信号','历史失败',meta['history_failure_count'],'详见错误日志'],
+              ['总耗时(秒)',meta['total_seconds'],'含数据、计算、中间文件；不含最终Excel写出','线程数',meta['workers'],''],
+          ]
+          for r in rows: ws.append(r)
+          header(ws,2,6)
+          autosize(ws,40)
+
+          tw=wb.create_sheet('运行耗时');title(tw,'运行耗时',4)
+          tw.append(['阶段','耗时(秒)','占比(%)','说明']);header(tw,2,4)
+          total=max(meta['total_seconds'],1e-9)
+          labels={
+              'spot_fetch_seconds':'实时快照获取','history_fetch_seconds':'历史日线获取','screen_compute_seconds':'筛选计算','write_intermediate_seconds':'写入中间结果'
+          }
+          for k,v in meta['timing'].items():
+              tw.append([labels.get(k,k),v,round(v/total*100,2),''])
+          tw.append(['脚本总耗时',meta['total_seconds'],100.0,'不含最终Excel构建'])
+          autosize(tw,36)
+
+          def add_df(name, df):
+              w=wb.create_sheet(name); title(w,name,max(1,len(df.columns)+1))
+              cols=['序号']+list(df.columns)
+              w.append(cols); header(w,2,len(cols)); w.freeze_panes='A3'
+              for i,row in enumerate(df.itertuples(index=False,name=None),1):
+                  w.append([i]+list(row))
+              if '分类' in df.columns:
+                  ci=cols.index('分类')+1
+                  for rr in range(3,w.max_row+1):
+                      if w.cell(rr,ci).value=='长期趋势':
+                          for cc in range(1,len(cols)+1): w.cell(rr,cc).fill=long_fill
+              autosize(w)
+              return w
+          add_df('基础入选',basic)
+          add_df('重点关注',focus)
+          add_df('大阳线收复',recovery)
+          add_df('错误日志',errors)
+
+          rw=wb.create_sheet('规则参数');title(rw,'Excel输出规则参数',5)
+          rules=[
+              ['模块','参数','正式条件','硬门槛','备注'],
+              ['基础池','市场','沪深A股；排除ST及北交所','是',''],
+              ['基础池','统计日成交金额','≥2亿元','是','统计时点累计成交额'],
+              ['基础入选','EMA13持续天数','≥4天','是','C严格>EMA13'],
+              ['基础入选','分类','4–5关注；6–20趋势；>20长期趋势','否','>20突出显示'],
+              ['EMA13容错','跌破日','EMA13×0.97<C<EMA13','容错','每连续区间最多一次'],
+              ['EMA13容错','收复日','下一交易日C>跌破日H','容错','跌破日计入连续天数'],
+              ['重点关注','EMA610','截至统计日连续≥3天C>EMA610','是','前提为基础入选'],
+              ['大阳线收复','信号窗口','最近5个实际交易日，且在当前持续区间','是','每股保留首次合格'],
+              ['大阳线收复','此前趋势','收复日前20根K内曾形成>15天短期趋势','是',''],
+              ['大阳线收复','EMA610','截至统计日连续≥10天C>EMA610','是',''],
+              ['大阳线收复','前3日','收复日前1/2/3日C均低于短期均线','是','跌破与收复相邻'],
+              ['大阳线收复','涨幅','较前收≥5%','是',''],
+              ['大阳线收复','阳线实体','C/O-1≥3%','是',''],
+              ['大阳线收复','成交量','收复日V>MA60(V)','是','严格大于'],
+              ['辅助','v1.0','连续V>当日MA60(V)天数','否','低于均量的一字涨/跌停可豁免；V=MA60不合格'],
+              ['辅助','e22','连续C>EMA21×1.1天数','否','严格大于'],
+              ['运行','启动时间','A股实际交易日13:30（北京时间）','运行规则','']
+          ]
+          for r in rules: rw.append(r)
+          header(rw,2,5);autosize(rw,46)
+
+          excel_seconds=round(time.perf_counter()-t0,4)
+          tw.append(['Excel构建',excel_seconds,0,'最终工作簿构建耗时'])
+          combined=round(meta['total_seconds']+excel_seconds,4)
+          tw.append(['端到端总耗时',combined,0,'脚本总耗时+Excel构建'])
+          ws['B9']=combined
+          ws['A9']='端到端总耗时(秒)'
+          path=os.path.join(outdir,f"A股趋势筛选_{meta['run_date']}_真实运行.xlsx")
+          wb.save(path)
+          print('EXCEL_PATH='+path)
+          print('EXCEL_SECONDS='+str(excel_seconds))
+          print('END_TO_END_SECONDS='+str(combined))
+          PY
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-stock-screening-20260908
+          path: |
+            .tmp/out/*.xlsx
+            .tmp/out/meta.json
+            .tmp/out/*.csv
+          if-no-files-found: error
